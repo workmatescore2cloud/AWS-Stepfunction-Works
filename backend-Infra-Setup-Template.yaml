@@ -1,0 +1,477 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template for Daycare Registration Workflow using API Gateway, Step Functions and Lambda Functions with DynamoDB."
+
+Resources:
+  # ----------------- IAM ROLE FOR LAMBDA -----------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ["lambda.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: "LambdaBasicExecutionAndEmailSending"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:*"
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - "ses:SendEmail"
+                Resource:
+                  - "arn:aws:ses:*:*:identity/*"
+                  - "arn:aws:ses:*:*:configuration-set/*"
+              - Effect: Allow
+                Action:
+                  - "dynamodb:*"
+                Resource: "*"
+
+  # ----------------- DYNAMODB TABLE FOR SPOTS -----------------
+  DaycareSpotsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "DaycareSpots"
+      AttributeDefinitions:
+        - AttributeName: "spot_id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "spot_id"
+          KeyType: "HASH"
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: "NEW_IMAGE"
+
+  # ----------------- LAMBDA FUNCTIONS -----------------
+  # Check Registration Information
+  CheckInformationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "CheckInformationFunction"
+      Handler: "index.lambda_handler"
+      Runtime: python3.12
+      Timeout: 90
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+
+          def lambda_handler(event, context):
+              # Extract the registration information from the event
+              registration_info = event.get('registration_info')
+
+              # Check if registration_info is present
+              if not registration_info:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Missing registration_info field'})
+                  }
+              
+              # Define the required fields
+              required_fields = ['child', 'parents', 'daysOfWeek']
+              
+              # Check if the required fields are present in the registration info
+              for field in required_fields:
+                  if field not in registration_info:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': f'Missing required field: {field}'})
+                      }
+
+              # Return the registration_info inside the body
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Registration information is valid',
+                      'registration_info': registration_info
+                  })
+              }
+
+  # Check Age Range
+  CheckAgeRangeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "CheckAgeRangeFunction"
+      Handler: "index.lambda_handler"
+      Runtime: python3.12
+      Timeout: 90
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          from datetime import datetime
+
+          def lambda_handler(event, context):
+              # Parse the body if the event contains 'body'
+              event_body = json.loads(event['body']) if 'body' in event else event
+              registration_info = event_body.get('registration_info')
+
+              # Check if registration_info is present
+              if not registration_info:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Missing registration_info field'})
+                  }
+
+              # Calculate the child's age
+              dob = registration_info['child']['dateOfBirth']
+              today = datetime.today()
+              dob_date = datetime.strptime(dob, '%Y-%m-%d')
+              age = today.year - dob_date.year - ((today.month, today.day) < (dob_date.month, dob_date.day))
+              
+              # Check if the age is within the acceptable range
+              if age < 2 or age > 7:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Child is not within the acceptable age range for this daycare.'})
+                  }
+              
+              # Add the age to the registration info
+              registration_info['child']['age'] = age
+              
+              # Return the registration_info inside the body as a proper JSON object
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Registration information is valid',
+                      'registration_info': registration_info
+                  })
+              }
+
+  # Check Availability in DynamoDB
+  CheckAvailabilityFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "CheckAvailabilityFunction"
+      Handler: "index.lambda_handler"
+      Runtime: python3.12
+      Timeout: 90
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          # Initialize DynamoDB client
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table('DaycareSpots')
+
+          def lambda_handler(event, context):
+              # Parse the 'body' field to get the registration info
+              event_body = json.loads(event['body']) if 'body' in event else event
+              registration_info = event_body.get('registration_info')
+
+              # Ensure registration_info is available
+              if not registration_info:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Missing registration_info field'})
+                  }
+
+              # Query DynamoDB to count the number of occupied spots
+              response = table.scan(
+                  FilterExpression="#status = :occupied",  # Use placeholder for reserved keyword "status"
+                  ExpressionAttributeNames={
+                      "#status": "status"  # Mapping the reserved word "status" to a placeholder
+                  },
+                  ExpressionAttributeValues={
+                      ":occupied": "occupied"
+                  }
+              )
+
+              occupied_spots = len(response['Items'])
+              total_spots = 50
+
+              if occupied_spots >= total_spots:
+                  # No spots available
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'No spots available in the daycare.'})
+                  }
+
+              # Proceed with registration if spots are available
+              # Return the registration_info inside the body
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'registration_info': registration_info  # Nested inside the body
+                  })
+              }
+
+  # Confirm Registration
+  ConfirmRegistrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "ConfirmRegistrationFunction"
+      Handler: "index.lambda_handler"
+      Runtime: python3.12
+      Timeout: 90
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime, timedelta
+
+          # Initialize SES and DynamoDB clients
+          ses_client = boto3.client('ses', region_name="ap-south-1")
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table('DaycareSpots')
+
+          def send_email(recipient, subject, body):
+              response = ses_client.send_email(
+                  Source="<configured -identity-email-id>",
+                  Destination={'ToAddresses': [recipient]},
+                  Message={'Subject': {'Data': subject}, 'Body': {'Text': {'Data': body}}}
+              )
+              return response
+
+          def lambda_handler(event, context):
+              # Parse the 'body' field to get the registration info
+              event_body = json.loads(event['body']) if 'body' in event else event
+              registration_info = event_body.get('registration_info')
+
+              # Ensure registration_info is available
+              if not registration_info:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Missing registration_info field'})
+                  }
+
+              # Extract the necessary information
+              child_name = registration_info['child']['firstName'] + " " + registration_info['child']['lastName']
+              parent_father_name = registration_info['parents']['father']['firstName'] + " " + registration_info['parents']['father']['lastName']
+              parent_mother_name = registration_info['parents']['mother']['firstName'] + " " + registration_info['parents']['mother']['lastName']
+              child_age = registration_info['child']['age']
+
+              # Calculate fees based on age
+              fees = calculate_fees(child_age)
+
+              # Generate the start date (1 week from now)
+              start_date = (datetime.now() + timedelta(weeks=1)).date()
+
+              # Assign a spot number (This is just an example, can be customized)
+              spot_number = "SPOT" + str(datetime.now().year) + str(datetime.now().month) + str(datetime.now().day)
+
+              # Prepare the confirmation details
+              confirmation_details = {
+                  'child_name': f"{registration_info['child']['firstName']} {registration_info['child']['lastName']}",
+                  'age': child_age,
+                  'mother_fname': f"{registration_info['parents']['mother']['firstName']}",
+                  'mother_name': f"{registration_info['parents']['mother']['firstName']} {registration_info['parents']['mother']['lastName']}",
+                  'father_fname': f"{registration_info['parents']['father']['firstName']}",
+                  'father_name': f"{registration_info['parents']['father']['firstName']} {registration_info['parents']['father']['lastName']}",
+                  'fees': fees,
+                  'start_date': start_date.isoformat(),
+                  'spot_number': spot_number,
+                  'confirmation_message': f"Registration for {registration_info['child']['firstName']} {registration_info['child']['lastName']} is confirmed!"
+              }
+
+              # Log confirmation details
+              print(f"Confirmation details prepared for {confirmation_details['child_name']}")
+
+              # Create the email body
+              email_subject = f"Confirmation of Registration for {confirmation_details['child_name']}"
+              email_body = f"""
+              Dear {confirmation_details['father_fname']} and {confirmation_details['mother_fname']},
+
+              We are pleased to confirm the registration of your child {confirmation_details['child_name']}.
+
+              Registration Details:
+              - Child's Name: {confirmation_details['child_name']}
+              - Age: {confirmation_details['age']} years
+              - Father: {confirmation_details['father_name']}
+              - Mother: {confirmation_details['mother_name']}
+              - Joining Fees: Rs {confirmation_details['fees']}
+              - Start Date: {confirmation_details['start_date']}
+              - Spot Number: {confirmation_details['spot_number']}
+
+              Thank you for registering with us!
+
+              Best regards,
+              The Daycare Team
+              """
+
+              # Send confirmation email to the father
+              print(f"Sending email to father at {registration_info['parents']['father']['email']}")
+              send_email(registration_info['parents']['father']['email'], email_subject, email_body)
+
+              # Send confirmation email to the mother
+              print(f"Sending email to mother at {registration_info['parents']['mother']['email']}")
+              send_email(registration_info['parents']['mother']['email'], email_subject, email_body)
+
+              # Update DynamoDB to mark the spot as occupied
+              spot_id = "SPOT" + str(datetime.now().year) + str(datetime.now().month) + str(datetime.now().day)
+              response = table.update_item(
+                  Key={'spot_id': spot_id},
+                  UpdateExpression="set #status = :occupied, child_name = :child_name, registration_date = :registration_date",
+                  ExpressionAttributeNames={
+                      "#status": "status"
+                  },
+                  ExpressionAttributeValues={
+                      ":occupied": "occupied",
+                      ":child_name": child_name,
+                      ":registration_date": str(datetime.now().date())
+                  },
+                  ReturnValues="UPDATED_NEW"
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'confirmation_message': confirmation_details['confirmation_message'],
+                      'start_date': str(start_date),
+                      'fees': fees,
+                      'spot_number': spot_number,
+                      'updated_item': response['Attributes']
+                  })
+              }
+
+          def calculate_fees(age):
+              """Calculate daycare fees based on the child's age."""
+              if age >= 2 and age < 3:
+                  return 950
+              elif age >= 3 and age < 4:
+                  return 850
+              elif age >= 4 and age < 5:
+                  return 750
+              elif age >= 5 and age < 8:
+                  return 650
+              return 0
+
+  # ----------------- STEP FUNCTION IAM ROLE -----------------
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ["states.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: "StepFunctionsLambdaExecution"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource:
+                  - !GetAtt CheckInformationFunction.Arn
+                  - !GetAtt CheckAgeRangeFunction.Arn
+                  - !GetAtt CheckAvailabilityFunction.Arn
+                  - !GetAtt ConfirmRegistrationFunction.Arn
+
+  # ----------------- STEP FUNCTION -----------------
+  DaycareStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "Comment": "Daycare Registration State Machine",
+            "StartAt": "CheckInformation",
+            "States": {
+              "CheckInformation": {
+                "Type": "Task",
+                "Resource": "${CheckInformationFunction.Arn}",
+                "Next": "CheckAgeRange",
+                "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail"}]
+              },
+              "CheckAgeRange": {
+                "Type": "Task",
+                "Resource": "${CheckAgeRangeFunction.Arn}",
+                "Next": "CheckAvailability",
+                "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail"}]
+              },
+              "CheckAvailability": {
+                "Type": "Task",
+                "Resource": "${CheckAvailabilityFunction.Arn}",
+                "Next": "ConfirmRegistration",
+                "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail"}]
+              },
+              "ConfirmRegistration": {
+                "Type": "Task",
+                "Resource": "${ConfirmRegistrationFunction.Arn}",
+                "End": true
+              },
+              "Fail": {
+                "Type": "Fail"
+              }
+            }
+          }
+
+  # ----------------- API GATEWAY -----------------
+  DaycareAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "DaycareRegistrationAPI"
+
+  DaycareResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt DaycareAPI.RootResourceId
+      PathPart: "register"
+      RestApiId: !Ref DaycareAPI
+
+  # ----------------- POST Method for Registration -----------------
+  DaycareMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DaycareAPI
+      ResourceId: !Ref DaycareResource
+      HttpMethod: "POST"
+      AuthorizationType: "NONE"
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: "POST"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:states:action/StartExecution"
+        Credentials: !GetAtt ApiGatewayStepFunctionsRole.Arn
+        RequestTemplates:
+          application/json: |
+            {
+              "input": "$util.escapeJavaScript($input.json('$'))",
+              "stateMachineArn": "${DaycareStateMachine}"
+            }
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'POST'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type, X-Amz-Date, Authorization, X-Api-Key'"
+
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+
+  # ----------------- IAM ROLE FOR API GATEWAY TO CALL STEP FUNCTION -----------------
+  ApiGatewayStepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: "apigateway.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "APIGatewayInvokeStepFunctions"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "states:StartExecution"
+                Resource: !Ref DaycareStateMachine
