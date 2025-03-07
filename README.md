@@ -51,7 +51,7 @@ This hands-on demo will guide users through creating a **serverless workflow** t
 
 ### **Option 2: Using CloudFormation (Recommended)**
 - Use the provided **CloudFormation template** to deploy infrastructure automatically.
-- **CloudFormation Template Link:** [GitHub Repository](https://github.com/your-repo/aws-stepfunctions-daycare)
+- **CloudFormation Template Link:** [GitHub Repository](https://github.com/workmatescore2cloud/AWS-Stepfunction-Works/blob/main/backend-Infra-Setup-Template.yaml)
 
 ## Testing
 - Trigger the API Gateway endpoint to initiate the registration.
