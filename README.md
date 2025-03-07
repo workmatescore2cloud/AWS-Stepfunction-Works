@@ -4,7 +4,6 @@
 This hands-on demo will guide users through creating a **serverless workflow** to automate daycare registration using **AWS Step Functions, Lambda, DynamoDB, and API Gateway**.
 
 ## Architecture Diagram
-(TBD - You can add a simple diagram to illustrate workflow execution.)
 
 ## Key Features
 - **Automated workflow** for daycare registration.
