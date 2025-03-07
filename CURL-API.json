@@ -1,0 +1,35 @@
+curl --location --request POST 'https://<api-id>.execute-api.<region>.amazonaws.com/<stage>/<resource name>' \
+--header 'User-Agent: Apidog/1.0.0 (https://apidog.com)' \
+--header 'Content-Type: application/json' \
+--header 'Accept: */*' \
+--header 'Host: <api-id>.execute-api.<region>.amazonaws.com' \
+--header 'Connection: keep-alive' \
+--data-raw '{
+  "registration_info": {
+    "child": {
+      "firstName": "Taylor",
+      "lastName": "Johnson",
+      "dateOfBirth": "2019-02-10"
+    },
+    "daysOfWeek": [
+      "Monday",
+      "Wednesday",
+      "Friday"
+    ],
+    "parents": {
+      "father": {
+        "firstName": "Adam",
+        "lastName": "Johnson",
+        "email": "abc@gmail.com",
+        "phone": "1234567890"
+      },
+      "mother": {
+        "firstName": "Eve",
+        "lastName": "Johnson",
+        "email": "abc@gmail.com",
+        "phone": "1234567890"
+      }
+    },
+    "specialInstructions": "Taylor is very playful and notorious, be aware of him"
+  }
+}'
